@@ -650,30 +650,33 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
           )}
         </div>
 
-        {/* Footer: categories + meta */}
+        {/* Footer: categories + meta — fixed two-row structure keeps all cards aligned */}
         <div className="relative mt-auto pt-3 border-t border-zinc-800/50">
-          <div className="flex items-center gap-1.5 flex-wrap">
+          {/* Row 1: chips + date — consistent height across all cards */}
+          <div className="flex items-center gap-1.5 flex-wrap min-h-[1.5rem]">
             {categories.map((cat) => (
               <CategoryChip key={cat.id} category={cat} onRemove={handleRemoveCategory} />
             ))}
             {categories.length === 0 && (
               <span className="text-xs text-zinc-700 italic">Uncategorized</span>
             )}
-            <button
-              onClick={() => setEditingCategories((v) => !v)}
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs text-zinc-700 hover:text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-all opacity-0 group-hover:opacity-100"
-              title="Edit categories"
-            >
-              <Pencil size={10} />
-              edit
-            </button>
-
-            {/* Date — pushed to right */}
             {isKnownAuthor && dateStr && (
               <span className="ml-auto text-xs text-zinc-600 flex-shrink-0">
                 {dateStr}
               </span>
             )}
+          </div>
+
+          {/* Row 2: edit button — always in DOM to reserve space; invisible until hover */}
+          <div className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={() => setEditingCategories((v) => !v)}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs text-zinc-700 hover:text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-all"
+              title="Edit categories"
+            >
+              <Pencil size={10} />
+              edit
+            </button>
           </div>
 
           {editingCategories && (
