@@ -256,6 +256,7 @@ export function extractEntities(rawJson: string): ExtractedEntities {
 export async function backfillEntities(
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
+  bookmarkIds?: string[],
 ): Promise<number> {
   const CHUNK = 100
   let total = 0
@@ -263,7 +264,12 @@ export async function backfillEntities(
   while (true) {
     if (shouldAbort?.()) break
     const bookmarks = await prisma.bookmark.findMany({
-      where: { entities: null },
+      where: {
+        entities: null,
+        ...(bookmarkIds && bookmarkIds.length > 0
+          ? { id: { in: bookmarkIds } }
+          : {}),
+      },
       take: CHUNK,
       select: { id: true, rawJson: true },
     })

@@ -4,6 +4,8 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import Link from 'next/link'
 import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles, Eye, Tag, Brain, Layers, StopCircle, RefreshCw, Clock, KeyRound, Trash2 } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
+import type { RequestedPipelineStage } from '@/lib/categorize-scope'
+import { formatImportResultSummary, getImportFollowupState } from '@/lib/import-ui-state'
 import { PIPELINE_WORKERS } from '@/lib/pipeline-config'
 
 type Step = 1 | 2 | 3
@@ -11,8 +13,16 @@ type Method = 'bookmarklet' | 'console' | 'live'
 
 interface ImportResult {
   imported: number
+  updated?: number
   skipped: number
   total: number
+  importedBookmarkIds?: string[]
+  missing?: {
+    entities: number
+    vision: number
+    enrichment: number
+    categorization: number
+  }
 }
 
 type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel' | null
@@ -984,59 +994,68 @@ function ImportingStep({ result }: {
       <div className="text-center">
         <p className="text-xl font-bold text-zinc-100">Import Complete</p>
         <p className="text-zinc-400 mt-1">
-          <span className="text-emerald-400 font-semibold">{result.imported}</span> imported,{' '}
-          <span className="text-zinc-500">{result.skipped} skipped</span> as duplicates
+          <span className="text-emerald-400 font-semibold">{formatImportResultSummary(result)}</span>
         </p>
       </div>
       <div className="flex items-center gap-2 text-indigo-400 text-sm">
         <Loader2 size={14} className="animate-spin" />
-        Starting AI categorization…
+        Preparing next steps…
       </div>
     </div>
   )
 }
 
-function CategorizeStep({ importedCount, force = false }: { importedCount: number; force?: boolean }) {
+function missingStagesToRequest(result: ImportResult | null): RequestedPipelineStage[] {
+  if (!result?.missing) return []
+
+  const stages: RequestedPipelineStage[] = []
+  if (result.missing.entities > 0) stages.push('entities')
+  if (result.missing.vision > 0) stages.push('vision')
+  if (result.missing.enrichment > 0) stages.push('enrichment')
+  if (result.missing.categorization > 0) stages.push('categorize')
+  return stages
+}
+
+function CategorizeStep({ importResult, force = false }: { importResult: ImportResult | null; force?: boolean }) {
   const [status, setStatus] = useState<CategorizeStatus | null>(null)
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const importedCount = importResult ? importResult.imported : -1
+  const followupState = getImportFollowupState(importResult)
+  const scopedBookmarkIds = importResult?.importedBookmarkIds ?? []
+  const requestedMissingStages = missingStagesToRequest(importResult)
 
-  // Clean up poll interval on unmount
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [])
 
-  // On mount: attach to running pipeline, or start one if new bookmarks were imported.
-  // importedCount: -1 = direct trigger (not from import), 0 = all skipped, >0 = new bookmarks
   useEffect(() => {
-    // All skipped — nothing to categorize
-    if (importedCount === 0) return
+    if (importedCount === 0 && !followupState.hasImportedScope) return
 
     void (async () => {
       try {
         const res = await fetch('/api/categorize')
         const data = await res.json() as CategorizeStatus
         if (data.status === 'running' || data.status === 'stopping') {
-          // Pipeline already in progress — attach to it
           setStatus(data)
           setRunning(true)
           setStopping(data.status === 'stopping')
           pollStatus()
-        } else {
-          // Start a fresh pipeline for the newly imported bookmarks
+        } else if (followupState.shouldAutoStart) {
           void startCategorization(force)
         }
       } catch {
-        void startCategorization(force)
+        if (followupState.shouldAutoStart) {
+          void startCategorization(force)
+        }
       }
     })()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [followupState.hasImportedScope, followupState.shouldAutoStart, force, importedCount])
 
   async function stopCategorization() {
     setStopping(true)
@@ -1049,16 +1068,25 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
     }
   }
 
-  async function startCategorization(force = false) {
+  async function startCategorization(forceRun = false, stages?: RequestedPipelineStage[]) {
     setError('')
     setRunning(true)
     setStopping(false)
     setDone(false)
+
+    const body = scopedBookmarkIds.length > 0
+      ? {
+          bookmarkIds: scopedBookmarkIds,
+          ...(forceRun ? { force: true } : {}),
+          ...(stages && stages.length > 0 ? { stages } : {}),
+        }
+      : (forceRun ? { force: true } : {})
+
     try {
       const res = await fetch('/api/categorize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(force ? { force: true } : {}),
+        body: JSON.stringify(body),
       })
       if (!res.ok && res.status !== 409) {
         const data = await res.json() as { error?: string }
@@ -1109,7 +1137,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
         <div className="space-y-3">
           <p className="text-sm text-red-400">{error}</p>
           <button
-            onClick={() => void startCategorization()}
+            onClick={() => void startCategorization(force, requestedMissingStages)}
             className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
           >
             Retry Categorization
@@ -1117,9 +1145,66 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
         </div>
       )}
 
+      {!running && !done && !error && followupState.mode === 'process-missing' && (
+        <div className="space-y-4">
+          <div className="p-4 rounded-xl bg-indigo-500/8 border border-indigo-500/20">
+            <p className="text-sm font-semibold text-zinc-100">Imported backup needs selective preprocessing</p>
+            <p className="text-xs text-zinc-400 mt-1">{formatImportResultSummary(importResult!)}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {followupState.missingItems.map((item) => (
+                <span key={item} className="px-2.5 py-1 rounded-full bg-zinc-800 text-zinc-300 text-xs border border-zinc-700">
+                  {item}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => void startCategorization(false, requestedMissingStages)}
+              className="flex-1 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
+            >
+              {followupState.primaryLabel}
+            </button>
+            <button
+              onClick={() => void startCategorization(true)}
+              className="px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium transition-colors border border-zinc-700"
+            >
+              Reprocess all imported bookmarks
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!running && !done && !error && followupState.mode === 'complete' && (
+        <div className="flex flex-col items-center gap-5 py-6">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
+            <CheckCircle size={32} className="text-emerald-400" />
+          </div>
+          <div className="text-center">
+            <p className="text-xl font-bold text-zinc-100">Restore complete</p>
+            <p className="text-zinc-500 text-sm mt-1">All imported bookmarks already include the available preprocessing data.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/bookmarks"
+              className="flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
+            >
+              {followupState.primaryLabel}
+              <ChevronRight size={16} />
+            </Link>
+            <button
+              onClick={() => void startCategorization(true)}
+              className="flex items-center gap-2 px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium transition-colors border border-zinc-700"
+            >
+              <RefreshCw size={14} />
+              Reprocess all imported bookmarks
+            </button>
+          </div>
+        </div>
+      )}
+
       {running && (
         <div className="space-y-4">
-          {/* Current stage */}
           {currentStageInfo && (
             <div className="flex items-start gap-3 p-3.5 rounded-xl bg-indigo-500/8 border border-indigo-500/20">
               <div className="text-indigo-400 mt-0.5 shrink-0">{currentStageInfo.icon}</div>
@@ -1131,7 +1216,6 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
             </div>
           )}
 
-          {/* Stage counters */}
           {status?.stageCounts && (
             <div className="space-y-1.5">
               {([
@@ -1160,7 +1244,6 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
             </div>
           )}
 
-          {/* Stop button */}
           <button
             onClick={() => void stopCategorization()}
             disabled={stopping}
@@ -1176,7 +1259,6 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
             </p>
           )}
 
-          {/* Progress bar during categorize/parallel stage */}
           {(status?.stage === 'categorize' || status?.stage === 'parallel') && (
             <div className="space-y-2">
               <div className="flex justify-between text-xs text-zinc-500">
@@ -1228,8 +1310,7 @@ function CategorizeStep({ importedCount, force = false }: { importedCount: numbe
         </div>
       )}
 
-      {/* All bookmarks already existed — nothing new to categorize */}
-      {importedCount === 0 && !running && (
+      {importedCount === 0 && !running && !followupState.hasImportedScope && (
         <div className="flex flex-col items-center gap-5 py-6">
           <div className="w-14 h-14 rounded-2xl bg-zinc-800 flex items-center justify-center">
             <CheckCircle size={32} className="text-zinc-500" />
@@ -1360,8 +1441,11 @@ export default function ImportPage() {
 
       const result: ImportResult = {
         imported: data.imported ?? data.count ?? 0,
+        updated: data.updated ?? 0,
         skipped: data.skipped ?? 0,
-        total: (data.imported ?? data.count ?? 0) + (data.skipped ?? 0),
+        total: data.total ?? ((data.imported ?? data.count ?? 0) + (data.updated ?? 0) + (data.skipped ?? 0)),
+        importedBookmarkIds: Array.isArray(data.importedBookmarkIds) ? data.importedBookmarkIds : undefined,
+        missing: data.missing ?? undefined,
       }
       setImportResult(result)
 
@@ -1380,7 +1464,7 @@ export default function ImportPage() {
     <div className="p-8 max-w-2xl mx-auto">
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-zinc-100">Import {importSource === 'like' ? 'Likes' : 'Bookmarks'}</h1>
-        <p className="text-zinc-400 mt-1">Export your X/Twitter {importSource === 'like' ? 'likes' : 'bookmarks'} as JSON, then upload below.</p>
+        <p className="text-zinc-400 mt-1">Upload a raw X/Twitter export or a Siftly JSON backup, then choose how much preprocessing to run.</p>
       </div>
 
       {/* Source selector */}
@@ -1426,7 +1510,7 @@ export default function ImportPage() {
             result={importing ? null : importResult}
           />
         )}
-        {step === 3 && <CategorizeStep importedCount={importResult ? importResult.imported : -1} force={forceReprocess} />}
+        {step === 3 && <CategorizeStep importResult={importResult} force={forceReprocess} />}
       </div>
     </div>
   )

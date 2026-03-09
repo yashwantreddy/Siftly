@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
+import { createPrismaImportRepository } from '@/lib/import-prisma-repository'
+import { isSiftlyJsonExport, normalizeSiftlyImportPayload } from '@/lib/import-export-shape'
+import { importRawBookmarks, importRestoredBookmarks } from '@/lib/import-service'
 import { parseBookmarksJson } from '@/lib/parser'
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -29,6 +32,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Failed to read file content' }, { status: 400 })
   }
 
+  let parsedJson: unknown
+  try {
+    parsedJson = JSON.parse(jsonString)
+  } catch (err) {
+    return NextResponse.json(
+      { error: `Failed to parse bookmarks JSON: ${err instanceof Error ? err.message : String(err)}` },
+      { status: 422 }
+    )
+  }
+
   // Create an import job to track progress
   const importJob = await prisma.importJob.create({
     data: {
@@ -39,9 +52,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     },
   })
 
-  let parsedBookmarks
+  const repository = createPrismaImportRepository(prisma)
+  const isRestoreImport = isSiftlyJsonExport(parsedJson)
+
+  let rawBookmarks = null
+  let restoredBookmarks = null
   try {
-    parsedBookmarks = parseBookmarksJson(jsonString)
+    if (isRestoreImport) {
+      restoredBookmarks = normalizeSiftlyImportPayload(parsedJson)
+    } else {
+      rawBookmarks = parseBookmarksJson(jsonString)
+    }
   } catch (err) {
     await prisma.importJob.update({
       where: { id: importJob.id },
@@ -58,75 +79,62 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // Determine source: formData param > JSON field > default "bookmark"
   let jsonSource: string | undefined
-  try {
-    const parsed = JSON.parse(jsonString)
-    if (typeof parsed?.source === 'string') jsonSource = parsed.source
-  } catch { /* already parsed above */ }
+  const parsedRecord = typeof parsedJson === 'object' && parsedJson !== null
+    ? parsedJson as { source?: unknown }
+    : null
+  if (typeof parsedRecord?.source === 'string') jsonSource = parsedRecord.source
   const source = (sourceParam === 'like' || sourceParam === 'bookmark')
     ? sourceParam
     : (jsonSource === 'like' ? 'like' : 'bookmark')
 
   await prisma.importJob.update({
     where: { id: importJob.id },
-    data: { totalCount: parsedBookmarks.length },
+    data: { totalCount: isRestoreImport ? restoredBookmarks?.length ?? 0 : rawBookmarks?.length ?? 0 },
   })
 
-  let importedCount = 0
-  let skippedCount = 0
-
-  for (const bookmark of parsedBookmarks) {
-    try {
-      const existing = await prisma.bookmark.findUnique({
-        where: { tweetId: bookmark.tweetId },
-        select: { id: true },
-      })
-
-      if (existing) {
-        skippedCount++
-        continue
-      }
-
-      const created = await prisma.bookmark.create({
-        data: {
-          tweetId: bookmark.tweetId,
-          text: bookmark.text,
-          authorHandle: bookmark.authorHandle,
-          authorName: bookmark.authorName,
-          tweetCreatedAt: bookmark.tweetCreatedAt,
-          rawJson: bookmark.rawJson,
-          source,
-        },
-      })
-
-      if (bookmark.media.length > 0) {
-        await prisma.mediaItem.createMany({
-          data: bookmark.media.map((m) => ({
-            bookmarkId: created.id,
-            type: m.type,
-            url: m.url,
-            thumbnailUrl: m.thumbnailUrl ?? null,
-          })),
+  let result
+  try {
+    result = isRestoreImport
+      ? await importRestoredBookmarks({
+          bookmarks: restoredBookmarks ?? [],
+          repository,
         })
-      }
+      : await importRawBookmarks({
+          bookmarks: rawBookmarks ?? [],
+          source,
+          repository,
+        })
+  } catch (err) {
+    await prisma.importJob.update({
+      where: { id: importJob.id },
+      data: {
+        status: 'error',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      },
+    })
 
-      importedCount++
-    } catch (err) {
-      console.error(`Failed to import tweet ${bookmark.tweetId}:`, err)
-      skippedCount++
-    }
+    return NextResponse.json(
+      { error: `Failed to import bookmarks: ${err instanceof Error ? err.message : String(err)}` },
+      { status: 500 }
+    )
   }
 
   await prisma.importJob.update({
     where: { id: importJob.id },
     data: {
       status: 'done',
-      processedCount: importedCount,
+      processedCount: result.imported + result.updated,
     },
   })
 
   return NextResponse.json({
     jobId: importJob.id,
-    count: importedCount,
-    skipped: skippedCount,
+    count: result.imported,
+    imported: result.imported,
+    updated: result.updated,
+    skipped: result.skipped,
+    total: result.total,
+    importedBookmarkIds: result.importedBookmarkIds,
+    missing: result.missing,
   })
 }
