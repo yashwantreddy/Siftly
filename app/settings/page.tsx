@@ -1,6 +1,11 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import type { ImageVisionProvider } from '@/lib/image-vision-config'
+import {
+  DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_OLLAMA_VISION_MODEL,
+} from '@/lib/image-vision-config'
 import {
   Eye,
   EyeOff,
@@ -26,6 +31,11 @@ const ANTHROPIC_MODELS = [
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', description: 'Fast & Cheap' },
   { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', description: 'Smart & Balanced' },
   { value: 'claude-opus-4-6', label: 'Opus 4.6', description: 'Most Capable' },
+]
+
+const IMAGE_VISION_PROVIDERS: { value: ImageVisionProvider; label: string; description: string }[] = [
+  { value: 'anthropic', label: 'Anthropic', description: 'Uses Claude for all preprocessing stages' },
+  { value: 'ollama', label: 'Ollama', description: 'Runs image vision, enrichment, and categorization locally' },
 ]
 
 
@@ -364,6 +374,200 @@ function ModelSelector({
   )
 }
 
+function ImageVisionSettings({ onToast }: { onToast: (t: Toast) => void }) {
+  const [provider, setProvider] = useState<ImageVisionProvider>('anthropic')
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_OLLAMA_BASE_URL)
+  const [model, setModel] = useState(DEFAULT_OLLAMA_VISION_MODEL)
+  const [loading, setLoading] = useState(true)
+  const [savingProvider, setSavingProvider] = useState(false)
+  const [savingBaseUrl, setSavingBaseUrl] = useState(false)
+  const [savingModel, setSavingModel] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testState, setTestState] = useState<'idle' | 'ok' | 'fail'>('idle')
+  const [testError, setTestError] = useState('')
+
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d: Record<string, unknown>) => {
+        setProvider((d.imageVisionProvider as ImageVisionProvider | undefined) ?? 'anthropic')
+        setBaseUrl((d.ollamaBaseUrl as string | undefined) ?? DEFAULT_OLLAMA_BASE_URL)
+        setModel((d.ollamaVisionModel as string | undefined) ?? DEFAULT_OLLAMA_VISION_MODEL)
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  async function saveSetting(
+    payload: Record<string, string>,
+    setSaving: (saving: boolean) => void,
+    successMessage: string,
+  ) {
+    setSaving(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json() as { error?: string }
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save setting')
+      onToast({ type: 'success', message: successMessage })
+    } catch (err) {
+      onToast({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to save setting',
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleProviderChange(nextProvider: ImageVisionProvider) {
+    setProvider(nextProvider)
+    setTestState('idle')
+    setTestError('')
+    await saveSetting(
+      { imageVisionProvider: nextProvider },
+      setSavingProvider,
+      `AI preprocessing provider set to ${nextProvider === 'ollama' ? 'Ollama' : 'Anthropic'}`,
+    )
+  }
+
+  async function handleTestOllama() {
+    setTesting(true)
+    setTestState('idle')
+    setTestError('')
+    try {
+      const res = await fetch('/api/settings/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'ollama' }),
+      })
+      const data = await res.json() as { working: boolean; error?: string }
+      if (!data.working) {
+        setTestState('fail')
+        setTestError(data.error ?? 'Ollama test failed')
+        return
+      }
+      setTestState('ok')
+      onToast({ type: 'success', message: 'Ollama preprocessing is reachable' })
+    } catch {
+      setTestState('fail')
+      setTestError('Connection error')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const selectedProvider = IMAGE_VISION_PROVIDERS.find((option) => option.value === provider) ?? IMAGE_VISION_PROVIDERS[0]
+
+  return (
+    <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950/50 p-4 space-y-4">
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-medium text-zinc-300">AI preprocessing provider</p>
+          {savingProvider && <span className="text-xs text-zinc-500">Saving…</span>}
+        </div>
+        <p className="text-xs text-zinc-500 mt-1">
+          Controls image vision, semantic enrichment, and categorization. AI search still uses Anthropic.
+        </p>
+        <div className="relative mt-2.5">
+          <select
+            value={provider}
+            onChange={(e) => void handleProviderChange(e.target.value as ImageVisionProvider)}
+            disabled={loading || savingProvider}
+            className="w-full appearance-none pl-3.5 pr-8 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer disabled:opacity-60"
+          >
+            {IMAGE_VISION_PROVIDERS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label} — {option.description}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+        </div>
+        <p className="text-xs text-zinc-600 mt-1.5">{selectedProvider.description}</p>
+      </div>
+
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-medium text-zinc-300">Ollama base URL</p>
+          {savingBaseUrl && <span className="text-xs text-zinc-500">Saving…</span>}
+        </div>
+        <div className="flex gap-2.5">
+          <input
+            type="text"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void saveSetting({ ollamaBaseUrl: baseUrl }, setSavingBaseUrl, 'Ollama base URL saved')}
+            placeholder={DEFAULT_OLLAMA_BASE_URL}
+            className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 placeholder:text-zinc-500 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 transition-all duration-200 font-mono"
+          />
+          <button
+            onClick={() => void saveSetting({ ollamaBaseUrl: baseUrl }, setSavingBaseUrl, 'Ollama base URL saved')}
+            disabled={savingBaseUrl}
+            className="px-5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-sm font-medium transition-colors shrink-0 disabled:opacity-50"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-medium text-zinc-300">Ollama preprocessing model</p>
+          {savingModel && <span className="text-xs text-zinc-500">Saving…</span>}
+        </div>
+        <div className="flex gap-2.5">
+          <input
+            type="text"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void saveSetting({ ollamaVisionModel: model }, setSavingModel, 'Ollama model saved')}
+            placeholder={DEFAULT_OLLAMA_VISION_MODEL}
+            className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-100 placeholder:text-zinc-500 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 transition-all duration-200 font-mono"
+          />
+          <button
+            onClick={() => void saveSetting({ ollamaVisionModel: model }, setSavingModel, 'Ollama model saved')}
+            disabled={savingModel}
+            className="px-5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-sm font-medium transition-colors shrink-0 disabled:opacity-50"
+          >
+            Save
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-zinc-600">The test checks local Ollama reachability and whether the configured preprocessing model is available.</p>
+          <div className="flex items-center gap-2 shrink-0">
+            {testing && (
+              <span className="flex items-center gap-1 text-xs text-zinc-400">
+                <Loader2 size={11} className="animate-spin" /> Testing…
+              </span>
+            )}
+            {!testing && testState === 'ok' && (
+              <span className="flex items-center gap-1 text-xs text-emerald-400">
+                <Check size={11} /> Working
+              </span>
+            )}
+            {!testing && testState === 'fail' && (
+              <span className="flex items-center gap-1 text-xs text-red-400" title={testError}>
+                <X size={11} /> {testError.slice(0, 40) || 'Failed'}
+              </span>
+            )}
+            <button
+              onClick={() => void handleTestOllama()}
+              disabled={testing}
+              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors"
+            >
+              Test Ollama
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 interface CliStatus {
   available: boolean
   subscriptionType?: string
@@ -444,7 +648,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
             label="Anthropic (Claude)"
             placeholder="sk-ant-api03-..."
             fieldKey="anthropicApiKey"
-            hint="Used for AI categorization, search, and image analysis."
+            hint="Used for AI search and any preprocessing runs that use Anthropic."
             docHref="https://console.anthropic.com"
             onToast={onToast}
             testProvider="anthropic"
@@ -455,8 +659,9 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
             defaultValue="claude-opus-4-6"
             onToast={onToast}
           />
-          <p className="text-xs text-zinc-500 mt-1.5">Applies to all AI operations — API key <strong className="text-zinc-400 font-medium">and Claude CLI</strong></p>
+          <p className="text-xs text-zinc-500 mt-1.5">Applies to AI search and Anthropic-backed preprocessing - API key <strong className="text-zinc-400 font-medium">and Claude CLI</strong></p>
         </div>
+        <ImageVisionSettings onToast={onToast} />
       </div>
       <p className="text-xs text-zinc-600 mt-4">Keys are stored in plaintext in your local SQLite database (<code className="font-mono">prisma/dev.db</code>). Do not expose the database file.</p>
     </Section>
@@ -501,12 +706,12 @@ function DataSection() {
         <ExportButton
           label="Export as CSV"
           href="/api/export?type=csv"
-          description="Spreadsheet-compatible format"
+          description="Spreadsheet-compatible format with AI preprocessing fields"
         />
         <ExportButton
           label="Export as JSON"
           href="/api/export?type=json"
-          description="Full data with all fields"
+          description="Full bookmark data including preprocessing output"
         />
       </div>
     </Section>

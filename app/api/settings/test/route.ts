@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { resolveAnthropicClient, getCliAuthStatus } from '@/lib/claude-cli-auth'
+import { ImageVisionProviderError, testOllamaConnection } from '@/lib/image-vision-provider'
+import { sanitizeOllamaBaseUrl, sanitizeOllamaVisionModel } from '@/lib/image-vision-config'
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: { provider?: string } = {}
@@ -44,6 +46,29 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         ? 'Key does not have permission'
         : msg.slice(0, 120)
       return NextResponse.json({ working: false, error: friendly })
+    }
+  }
+
+  if (provider === 'ollama') {
+    const [baseUrlSetting, modelSetting] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: 'ollamaBaseUrl' } }),
+      prisma.setting.findUnique({ where: { key: 'ollamaVisionModel' } }),
+    ])
+
+    const baseUrl = sanitizeOllamaBaseUrl(baseUrlSetting?.value)
+    const model = sanitizeOllamaVisionModel(modelSetting?.value)
+
+    try {
+      await testOllamaConnection({ baseUrl, model })
+      return NextResponse.json({ working: true })
+    } catch (err) {
+      if (err instanceof ImageVisionProviderError) {
+        return NextResponse.json({ working: false, error: err.message })
+      }
+      return NextResponse.json({
+        working: false,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 

@@ -1,4 +1,4 @@
-# Siftly — Claude Code Guide
+# Siftly — Codex Guide
 
 Self-hosted Twitter/X bookmark manager with AI-powered categorization, search, and visualization.
 
@@ -25,10 +25,10 @@ For a single command that does all of the above and opens the browser automatica
 
 ## AI Authentication — No API Key Needed
 
-If the user is signed into Claude Code CLI, **Siftly uses their Claude subscription automatically**. No API key configuration required.
+If the user is signed into Codex CLI, **Siftly uses their Codex subscription automatically**. No API key configuration required.
 
 How it works:
-- `lib/claude-cli-auth.ts` reads the OAuth token from the macOS keychain (`Claude Code-credentials`)
+- `lib/Codex-cli-auth.ts` reads the OAuth token from the macOS keychain (`Codex-credentials`)
 - Uses `authToken` + `anthropic-beta: oauth-2025-04-20` header in the Anthropic SDK
 - Falls back to: DB-saved API key → `ANTHROPIC_API_KEY` env var → local proxy
 
@@ -61,9 +61,9 @@ app/
   api/
     categorize/       # 4-stage AI pipeline (start/stop/status via SSE)
     import/           # Bookmark JSON import + dedup
-    search/ai/        # FTS5 + Claude semantic search
+    search/ai/        # FTS5 + Codex semantic search
     settings/
-      cli-status/     # GET — returns Claude CLI auth status
+      cli-status/     # GET — returns Codex CLI auth status
       test/           # POST — validates API key or CLI auth
     analyze/images/   # Vision analysis progress + trigger
     bookmarks/        # CRUD + filtering
@@ -78,7 +78,7 @@ app/
   categorize/         # Pipeline monitor
 
 lib/
-  claude-cli-auth.ts  # Claude CLI OAuth session (macOS keychain)
+  Codex-cli-auth.ts  # Codex CLI OAuth session (macOS keychain)
   categorizer.ts      # AI categorization + default categories
   vision-analyzer.ts  # Image vision + semantic tagging
   fts.ts              # SQLite FTS5 full-text search
@@ -103,7 +103,7 @@ Only `DATABASE_URL` is required. Everything else is optional:
 
 ```env
 DATABASE_URL="file:./prisma/dev.db"       # required — set by default in .env
-ANTHROPIC_API_KEY=sk-ant-...              # optional if Claude CLI is signed in
+ANTHROPIC_API_KEY=sk-ant-...              # optional if Codex CLI is signed in
 ANTHROPIC_BASE_URL=http://localhost:8080  # optional — for local proxies
 ```
 
@@ -127,7 +127,7 @@ npm run siftly -- stats                              # Alternative via npm scrip
 POST to `/api/categorize` with `{}` body. Monitor progress via GET `/api/categorize` (returns SSE stream).
 
 ### Add a new bookmark category
-Edit `DEFAULT_CATEGORIES` array in `lib/categorizer.ts`. Add name, slug, hex color, and description. The description text is passed verbatim to Claude — be specific.
+Edit `DEFAULT_CATEGORIES` array in `lib/categorizer.ts`. Add name, slug, hex color, and description. The description text is passed verbatim to Codex — be specific.
 
 ### Add a known tool for entity extraction
 Append a domain string to `KNOWN_TOOL_DOMAINS` in `lib/rawjson-extractor.ts`.
@@ -140,7 +140,7 @@ curl -X POST http://localhost:3000/api/settings/test \
 # Returns: {"working": true}
 ```
 
-### Check Claude CLI auth status
+### Check Codex CLI auth status
 ```bash
 curl http://localhost:3000/api/settings/cli-status
 # Returns: {"available": true, "subscriptionType": "max", "expired": false}

@@ -1,12 +1,30 @@
 import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
-import { buildImageContext } from '@/lib/image-context'
 import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
+import {
+  createAnthropicImageVisionProvider,
+  createOllamaImageVisionProvider,
+  ImageVisionProviderError,
+  type AllowedMediaType,
+} from '@/lib/image-vision-provider'
+import {
+  getAnthropicModel,
+  getImageVisionProvider,
+  getOllamaBaseUrl,
+  getOllamaVisionModel,
+} from '@/lib/settings'
+import {
+  buildSemanticEnrichmentItems,
+  BookmarkForEnrichment,
+  createAnthropicSemanticEnrichmentProvider,
+  createOllamaSemanticEnrichmentProvider,
+  EnrichmentResult,
+  getSemanticEnrichmentPrompt,
+  parseEnrichmentResponse,
+} from '@/lib/semantic-enrichment-provider'
 
-export { getAnthropicModel } from '@/lib/settings'
-
-type AllowedMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+export { getAnthropicModel, getImageVisionProvider, getOllamaBaseUrl, getOllamaVisionModel } from '@/lib/settings'
+export type { BookmarkForEnrichment, EnrichmentResult } from '@/lib/semantic-enrichment-provider'
 
 function guessMediaType(url: string, contentTypeHeader: string | null): AllowedMediaType {
   const ct = contentTypeHeader?.toLowerCase() ?? ''
@@ -43,64 +61,42 @@ async function fetchImageAsBase64(
   }
 }
 
-const ANALYSIS_PROMPT = `Analyze this image for a bookmark search system. Return ONLY valid JSON, no markdown, no explanation.
-
-{
-  "people": ["description of each person visible — age, gender, appearance, expression, what they're doing"],
-  "text_ocr": ["ALL visible text exactly as written — signs, captions, UI text, meme text, headlines, code"],
-  "objects": ["significant objects, brands, logos, symbols, technology"],
-  "scene": "brief scene description — setting and platform (e.g. 'Twitter screenshot', 'office desk', 'terminal window')",
-  "action": "what is happening or being shown",
-  "mood": "emotional tone: humorous/educational/alarming/inspiring/satirical/celebratory/neutral",
-  "style": "photo/screenshot/meme/chart/infographic/artwork/gif/code/diagram",
-  "meme_template": "specific meme template name if applicable, else null",
-  "tags": ["30-40 specific searchable tags — topics, synonyms, proper nouns, brands, actions, emotions"]
-}
-
-Rules:
-- text_ocr: transcribe ALL readable text exactly, word for word
-- If a financial chart: include asset name, direction (up/down), timeframe
-- If code: include language, key function/concept names
-- If a meme: include the exact template name
-- tags: be maximally specific — include brand names, person names, tool names, technical terms
-- BAD tags: "twitter", "post", "image", "screenshot" (too generic)
-- GOOD tags: "bitcoin price chart", "react hooks", "frustrated man", "gpt-4", "bull market"`
-
 const RETRY_DELAYS_MS = [1500, 4000, 10000]
 const CONCURRENCY = 12
 
 async function analyzeImageWithRetry(
   url: string,
-  client: Anthropic,
+  client: Anthropic | null,
   model: string,
   attempt = 0,
 ): Promise<string> {
   const img = await fetchImageAsBase64(url)
   if (!img) return ''
 
-  try {
-    const msg = await client.messages.create({
-      model,
-      max_tokens: 700,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } },
-            { type: 'text', text: ANALYSIS_PROMPT },
-          ],
-        },
-      ],
-    })
-    const raw = msg.content.find((b) => b.type === 'text')?.text?.trim() ?? ''
-    if (!raw) return ''
+  const visionProvider = await getImageVisionProvider()
 
-    // Validate it's parseable JSON
-    const jsonMatch = raw.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return ''
-    JSON.parse(jsonMatch[0]) // throws if invalid
-    return jsonMatch[0]
+  try {
+    if (visionProvider === 'ollama') {
+      const ollamaProvider = createOllamaImageVisionProvider({
+        baseUrl: await getOllamaBaseUrl(),
+        model: await getOllamaVisionModel(),
+      })
+      return await ollamaProvider.analyze(img)
+    }
+
+    if (!client) {
+      throw new ImageVisionProviderError('No Anthropic client available for image analysis.', {
+        code: 'config',
+        provider: 'anthropic',
+      })
+    }
+
+    return await createAnthropicImageVisionProvider({ client, model }).analyze(img)
   } catch (err) {
+    if (err instanceof ImageVisionProviderError && err.provider === 'ollama') {
+      throw err
+    }
+
     const msg = err instanceof Error ? err.message : String(err)
     // Never retry client errors (4xx) — bad request, invalid image, too large, etc.
     const isClientError = msg.includes('400') || msg.includes('401') || msg.includes('403') || msg.includes('422')
@@ -152,7 +148,7 @@ async function getCachedAnalysis(imageUrl: string, excludeId: string): Promise<s
 
 export async function analyzeItem(
   item: MediaItemForAnalysis,
-  client: Anthropic,
+  client: Anthropic | null,
   model: string,
 ): Promise<number> {
   const imageUrl = item.type === 'video' ? (item.thumbnailUrl ?? item.url) : item.url
@@ -165,7 +161,13 @@ export async function analyzeItem(
   }
 
   const prefix = item.type === 'video' ? '{"_type":"video_thumbnail",' : ''
-  let tags = await analyzeImageWithRetry(imageUrl, client, model)
+  let tags = ''
+  try {
+    tags = await analyzeImageWithRetry(imageUrl, client, model)
+  } catch (err) {
+    await prisma.mediaItem.update({ where: { id: item.id }, data: { imageTags: '{}' } })
+    throw err
+  }
 
   if (tags && prefix) {
     // Inject a _type marker into the JSON for video thumbnails
@@ -204,7 +206,7 @@ export async function runWithConcurrency<T>(
 
 export async function analyzeBatch(
   items: MediaItemForAnalysis[],
-  client: Anthropic,
+  client: Anthropic | null,
   onProgress?: (delta: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -224,7 +226,7 @@ export async function analyzeBatch(
   return results.reduce((sum, r) => sum + r, 0)
 }
 
-export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Promise<number> {
+export async function analyzeUntaggedImages(client: Anthropic | null, limit = 10): Promise<number> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif', 'video'] } },
     take: limit,
@@ -238,7 +240,7 @@ export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Prom
  * Analyze ALL untagged media items (no limit). Used during full AI categorization.
  */
 export async function analyzeAllUntagged(
-  client: Anthropic,
+  client: Anthropic | null,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -283,80 +285,21 @@ export async function analyzeAllUntagged(
 const ENRICH_BATCH_SIZE = 5
 const ENRICH_CONCURRENCY = 2
 
-export interface BookmarkForEnrichment {
-  id: string
-  text: string
-  imageTags: string[] // filtered, non-empty
-  entities?: {
-    hashtags?: string[]
-    urls?: string[]
-    mentions?: string[]
-    tools?: string[]
-    tweetType?: string
-  }
-}
-
-export interface EnrichmentResult {
-  id: string
-  tags: string[]
-  sentiment: string
-  people: string[]
-  companies: string[]
-}
-
-function buildEnrichmentPrompt(bookmarks: BookmarkForEnrichment[]): string {
-  const items = bookmarks.map((b) => {
-    const entry: Record<string, unknown> = { id: b.id, text: b.text.slice(0, 500) }
-    const imgCtx = b.imageTags.map((raw) => buildImageContext(raw)).filter(Boolean).join(' | ')
-    if (imgCtx) entry.imageContext = imgCtx
-    if (b.entities?.hashtags?.length) entry.hashtags = b.entities.hashtags.slice(0, 8)
-    if (b.entities?.tools?.length) entry.tools = b.entities.tools
-    if (b.entities?.mentions?.length) entry.mentions = b.entities.mentions.slice(0, 3)
-    return entry
-  })
-
-  return `Generate search tags and metadata for each of these Twitter/X bookmarks.
-
-For each bookmark return:
-- tags: 25-35 specific semantic search tags covering entities, actions, visual content, synonyms, and emotional signals
-- sentiment: one of "positive", "negative", "neutral", "humorous", "controversial"
-- people: named people mentioned or shown (max 5, empty array if none)
-- companies: company/product/tool names explicitly referenced (max 8, empty array if none)
-
-Rules for tags:
-- 2-5 words max, specific beats generic
-- NO generic terms: "twitter post", "screenshot", "social media", "content"
-- YES to proper nouns, version numbers, specific concepts
-- Rank most-search-relevant tags first
-
-Return ONLY valid JSON, no markdown:
-[{"id":"...","tags":[...],"sentiment":"...","people":[...],"companies":[...]}]
-
-BOOKMARKS:
-${JSON.stringify(items, null, 1)}`
-}
-
 export async function enrichBatchSemanticTags(
   bookmarks: BookmarkForEnrichment[],
   client: Anthropic | null,
 ): Promise<EnrichmentResult[]> {
   if (bookmarks.length === 0) return []
 
-  const prompt = buildEnrichmentPrompt(bookmarks)
+  const bookmarksJson = buildSemanticEnrichmentItems(bookmarks)
+  const provider = await getImageVisionProvider()
 
-  // Helper to parse enrichment response
-  const parseResponse = (text: string): EnrichmentResult[] => {
-    const match = text.match(/\[[\s\S]*\]/)
-    if (!match) return []
-    const parsed: unknown = JSON.parse(match[0])
-    if (!Array.isArray(parsed)) return []
-    return (parsed as Record<string, unknown>[]).map((item): EnrichmentResult => ({
-      id: String(item.id ?? ''),
-      tags: Array.isArray(item.tags) ? (item.tags as unknown[]).map(String).filter(Boolean) : [],
-      sentiment: String(item.sentiment ?? 'neutral'),
-      people: Array.isArray(item.people) ? (item.people as unknown[]).map(String).filter(Boolean) : [],
-      companies: Array.isArray(item.companies) ? (item.companies as unknown[]).map(String).filter(Boolean) : [],
-    })).filter((r) => r.id)
+  if (provider === 'ollama') {
+    const ollamaProvider = createOllamaSemanticEnrichmentProvider({
+      baseUrl: await getOllamaBaseUrl(),
+      model: await getOllamaVisionModel(),
+    })
+    return ollamaProvider.enrich(bookmarksJson)
   }
 
   // Prefer CLI over SDK
@@ -364,10 +307,10 @@ export async function enrichBatchSemanticTags(
     const modelSetting = await getAnthropicModel()
     const cliModel = modelNameToCliAlias(modelSetting)
 
-    const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 90_000 })
+    const result = await claudePrompt(getSemanticEnrichmentPrompt(bookmarksJson), { model: cliModel, timeoutMs: 90_000 })
     if (result.success && result.data) {
       try {
-        return parseResponse(result.data)
+        return parseEnrichmentResponse(result.data)
       } catch {
         console.warn('[enrich] CLI response parse failed, falling back to SDK')
       }
@@ -385,13 +328,7 @@ export async function enrichBatchSemanticTags(
 
   for (let attempt = 0; attempt <= ENRICH_RETRY_DELAYS.length; attempt++) {
     try {
-      const msg = await client.messages.create({
-        model,
-        max_tokens: 4096,
-        messages: [{ role: 'user', content: prompt }],
-      })
-      const text = msg.content.find((b) => b.type === 'text')?.text ?? ''
-      const results = parseResponse(text)
+      const results = await createAnthropicSemanticEnrichmentProvider({ client, model }).enrich(bookmarksJson)
       if (results.length > 0) return results
       console.warn(`[enrich] no JSON array in response (attempt ${attempt + 1})`)
     } catch (err) {

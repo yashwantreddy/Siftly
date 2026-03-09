@@ -3,6 +3,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { analyzeBatch } from '@/lib/vision-analyzer'
 import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
+import { ImageVisionProviderError } from '@/lib/image-vision-provider'
+import { getImageVisionProvider } from '@/lib/settings'
 
 // GET: returns progress stats
 export async function GET(): Promise<NextResponse> {
@@ -23,20 +25,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // use default
   }
 
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  const dbKey = setting?.value?.trim()
+  const visionProvider = await getImageVisionProvider()
+  let client: Anthropic | null = null
 
-  let client
-  try {
-    client = resolveAnthropicClient({ dbKey })
-  } catch {
-    return NextResponse.json({ error: 'No API key configured. Add your key in Settings or sign in to Claude CLI.' }, { status: 400 })
+  if (visionProvider === 'anthropic') {
+    const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
+    const dbKey = setting?.value?.trim()
+
+    try {
+      client = resolveAnthropicClient({ dbKey })
+    } catch {
+      return NextResponse.json({ error: 'No API key configured. Add your key in Settings or sign in to Claude CLI.' }, { status: 400 })
+    }
   }
 
   return runAnalysis(client, batchSize)
 }
 
-async function runAnalysis(client: Anthropic, batchSize: number): Promise<NextResponse> {
+async function runAnalysis(client: Anthropic | null, batchSize: number): Promise<NextResponse> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },
     take: batchSize,
@@ -47,7 +53,17 @@ async function runAnalysis(client: Anthropic, batchSize: number): Promise<NextRe
     return NextResponse.json({ analyzed: 0, remaining: 0, message: 'All images already analyzed.' })
   }
 
-  const analyzed = await analyzeBatch(untagged, client)
+  let analyzed = 0
+  try {
+    analyzed = await analyzeBatch(untagged, client)
+  } catch (err) {
+    const message = err instanceof ImageVisionProviderError
+      ? err.message
+      : err instanceof Error
+        ? err.message
+        : String(err)
+    return NextResponse.json({ error: message }, { status: 502 })
+  }
 
   const remaining = await prisma.mediaItem.count({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },

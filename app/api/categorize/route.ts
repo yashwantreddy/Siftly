@@ -15,9 +15,12 @@ import {
   runWithConcurrency,
   enrichBatchSemanticTags,
   BookmarkForEnrichment,
+  getImageVisionProvider,
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
 import { rebuildFts } from '@/lib/fts'
+import { PIPELINE_WORKERS } from '@/lib/pipeline-config'
+import { getPipelineAiRequirements } from '@/lib/semantic-enrichment-provider'
 
 type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel'
 
@@ -92,7 +95,6 @@ export async function DELETE(): Promise<NextResponse> {
   return NextResponse.json({ stopped: true })
 }
 
-const PIPELINE_WORKERS = 20
 const CAT_BATCH_SIZE = 25
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -150,12 +152,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const counts = { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 }
 
     try {
-      let client: Anthropic
+      const preprocessingProvider = await getImageVisionProvider()
+      const pipelineRequirements = getPipelineAiRequirements(preprocessingProvider)
+      let client: Anthropic | null = null
       try {
         client = resolveAnthropicClient({ dbKey: dbApiKey })
       } catch {
+        client = null
+      }
+
+      if (!client && pipelineRequirements.needsAnthropicForVision) {
         setState({ lastError: 'No Anthropic API key configured. Go to Settings to add one, or log in with Claude CLI.' })
-        console.error('No API key or CLI auth — skipping pipeline')
+        console.error('No API key or CLI auth — skipping anthropic-backed preprocessing pipeline')
         return
       }
 
@@ -209,12 +217,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             dbCategories.map((c) => [c.slug, c.description?.trim() || c.name]),
           )
           const model = await getAnthropicModel()
+          const categorizationEnabled = pipelineRequirements.needsAnthropicForCategorization ? client !== null : true
 
           // Shared categorization queue (JS single-threaded: splice is atomic vs async)
           const catPending: string[] = []
           let catFlushing = false
 
           async function drainCategorizeQueue(final = false): Promise<void> {
+            if (!categorizationEnabled) {
+              catPending.splice(0, catPending.length)
+              return
+            }
             if (final) {
               // Wait for any in-progress flush before draining remainder
               while (catFlushing) {

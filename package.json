@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "siftly": "tsx cli/siftly.ts"
+    "siftly": "tsx cli/siftly.ts",
+    "test:ollama-stress": "node --import tsx --test tests/ollama-live-stress.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

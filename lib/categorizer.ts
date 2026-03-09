@@ -1,8 +1,15 @@
 import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
-import { buildImageContext } from '@/lib/image-context'
 import { resolveAnthropicClient, getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
+import { getAnthropicModel, getImageVisionProvider, getOllamaBaseUrl, getOllamaVisionModel } from '@/lib/settings'
+import {
+  buildCategorizationPrompt,
+  BookmarkForCategorization,
+  CategorizationResult,
+  createAnthropicCategorizationProvider,
+  createOllamaCategorizationProvider,
+  parseCategorizationResponse,
+} from '@/lib/categorization-provider'
 
 const BATCH_SIZE = 20
 
@@ -112,27 +119,8 @@ const DEFAULT_CATEGORIES = [
   },
 ] as const
 
-// Default slugs only used for seeding — all runtime categorization uses DB slugs
+// Default slugs only used for seeding - all runtime categorization uses DB slugs
 const DEFAULT_SLUGS = DEFAULT_CATEGORIES.map((c) => c.slug)
-
-interface BookmarkForCategorization {
-  tweetId: string
-  text: string
-  imageTags?: string
-  semanticTags?: string[]
-  hashtags?: string[]
-  tools?: string[]
-}
-
-interface CategoryAssignment {
-  category: string
-  confidence: number
-}
-
-interface CategorizationResult {
-  tweetId: string
-  assignments: CategoryAssignment[]
-}
 
 export async function seedDefaultCategories(): Promise<void> {
   const existing = await prisma.category.findMany({ select: { slug: true } })
@@ -151,84 +139,6 @@ export async function seedDefaultCategories(): Promise<void> {
   }
 }
 
-function buildCategorizationPrompt(
-  bookmarks: BookmarkForCategorization[],
-  categoryDescriptions: Record<string, string>,
-  allSlugs: string[],
-): string {
-  const categoriesList = allSlugs.map(
-    (slug) => `- ${slug}: ${categoryDescriptions[slug] ?? slug.replace(/-/g, ' ')}`,
-  ).join('\n')
-
-  const tweetData = bookmarks.map((b) => {
-    const entry: Record<string, unknown> = { id: b.tweetId, text: b.text.slice(0, 400) }
-    const imgCtx = buildImageContext(b.imageTags)
-    if (imgCtx) entry.images = imgCtx
-    if (b.semanticTags?.length) entry.aiTags = b.semanticTags.slice(0, 20).join(', ')
-    if (b.hashtags?.length) entry.hashtags = b.hashtags.slice(0, 10).join(', ')
-    if (b.tools?.length) entry.tools = b.tools.join(', ')
-    return entry
-  })
-
-  return `You are an expert librarian categorizing Twitter/X bookmarks into a personal knowledge base. Your categorizations directly power search and discovery — accuracy is critical.
-
-AVAILABLE CATEGORIES:
-${categoriesList}
-
-CATEGORIZATION RULES:
-- Assign 1-3 categories per bookmark — only what CLEARLY applies
-- Confidence 0.5-1.0: use 0.9+ for obvious fits, 0.6-0.8 for plausible, 0.5 for borderline
-- Priority: specific categories beat "general" — only use "general" when truly nothing else fits
-- Use ALL signals: tweet text, image analysis, OCR text inside images, hashtags, detected tools, semantic AI tags
-
-SIGNAL WEIGHTING (use all, not just text):
-- Image shows financial chart, price action, wallet UI → finance-crypto (even if tweet text is vague)
-- Image shows code, terminal, GitHub, a dev tool UI → dev-tools
-- Image is clearly a meme format or labeled as humor/satire → funny-memes with high confidence
-- Tools field mentions GitHub/Vercel/React/etc → dev-tools likely applies
-- aiTags field is pre-computed context — trust it heavily for category signals
-- Hashtags like #bitcoin #eth → finance-crypto; #buildinpublic #saas → dev-tools/productivity
-
-AVOID:
-- Over-assigning "general" — it's a catch-all, not a default
-- Conflating news about AI with AI resources (a news thread about OpenAI is "news", not "ai-resources")
-- Assigning categories based only on passing mentions (a dev tweet that mentions a price = dev-tools, not finance)
-
-Return ONLY valid JSON — no markdown, no explanation:
-[{
-  "tweetId": "123",
-  "assignments": [
-    {"category": "ai-resources", "confidence": 0.92},
-    {"category": "dev-tools", "confidence": 0.71}
-  ]
-}]
-
-BOOKMARKS:
-${JSON.stringify(tweetData, null, 1)}`
-}
-
-function parseCategorizationResponse(text: string, validSlugs: Set<string>): CategorizationResult[] {
-  const jsonMatch = text.match(/\[[\s\S]*\]/)
-  if (!jsonMatch) throw new Error('No JSON array found in Claude response')
-
-  const parsed: unknown = JSON.parse(jsonMatch[0])
-  if (!Array.isArray(parsed)) throw new Error('Claude response is not an array')
-
-  return (parsed as Record<string, unknown>[]).map((item): CategorizationResult => {
-    const tweetId = String(item.tweetId ?? '')
-    const rawAssignments = Array.isArray(item.assignments) ? item.assignments : []
-
-    const assignments: CategoryAssignment[] = (rawAssignments as Record<string, unknown>[])
-      .map((a) => ({
-        category: String(a.category ?? ''),
-        confidence: typeof a.confidence === 'number' ? Math.min(1, Math.max(0.5, a.confidence)) : 0.8,
-      }))
-      .filter((a) => validSlugs.has(a.category))
-
-    return { tweetId, assignments }
-  })
-}
-
 export async function categorizeBatch(
   bookmarks: BookmarkForCategorization[],
   client: Anthropic | null,
@@ -238,6 +148,16 @@ export async function categorizeBatch(
   if (bookmarks.length === 0) return []
 
   const prompt = buildCategorizationPrompt(bookmarks, categoryDescriptions, allSlugs)
+  const validSlugs = new Set(allSlugs)
+  const preprocessingProvider = await getImageVisionProvider()
+
+  if (preprocessingProvider === 'ollama') {
+    const provider = createOllamaCategorizationProvider({
+      baseUrl: await getOllamaBaseUrl(),
+      model: await getOllamaVisionModel(),
+    })
+    return provider.categorize(prompt, validSlugs)
+  }
 
   // Prefer CLI over SDK (avoids OAuth token extraction, uses CLI directly)
   if (await getCliAvailability()) {
@@ -247,7 +167,7 @@ export async function categorizeBatch(
     const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 60_000 })
     if (result.success && result.data) {
       try {
-        return parseCategorizationResponse(result.data, new Set(allSlugs))
+        return parseCategorizationResponse(result.data, validSlugs)
       } catch (parseErr) {
         console.warn('[categorize] CLI response parse failed, falling back to SDK:', parseErr)
       }
@@ -262,16 +182,7 @@ export async function categorizeBatch(
   }
 
   const model = await getAnthropicModel()
-  const message = await client.messages.create({
-    model,
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  })
-
-  const textBlock = message.content.find((b) => b.type === 'text')
-  if (!textBlock || textBlock.type !== 'text') throw new Error('No text content in Claude response')
-
-  return parseCategorizationResponse(textBlock.text, new Set(allSlugs))
+  return createAnthropicCategorizationProvider({ client, model }).categorize(prompt, validSlugs)
 }
 
 export async function writeCategoryResults(results: CategorizationResult[]): Promise<void> {
@@ -381,9 +292,14 @@ export async function categorizeAll(
 ): Promise<void> {
   await seedDefaultCategories()
 
-  // Resolve auth once — avoids re-resolving inside every batch call
+  const preprocessingProvider = await getImageVisionProvider()
+
+  // Resolve auth once for Anthropic-backed categorization — avoids re-resolving inside every batch call
   const apiKeySetting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  const client = resolveAnthropicClient({ dbKey: apiKeySetting?.value })
+  let client: Anthropic | null = null
+  if (preprocessingProvider === 'anthropic') {
+    client = resolveAnthropicClient({ dbKey: apiKeySetting?.value })
+  }
 
   // Load ALL categories (default + custom) for the prompt
   const dbCategories = await prisma.category.findMany({ select: { slug: true, name: true, description: true } })
