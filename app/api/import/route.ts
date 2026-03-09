@@ -9,8 +9,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let formData: FormData
   try {
     formData = await request.formData()
-  } catch {
-    return NextResponse.json({ error: 'Failed to parse form data' }, { status: 400 })
+  } catch (err) {
+    return NextResponse.json(
+      { error: `Failed to parse form data: ${err instanceof Error ? err.message : String(err)}` },
+      { status: 400 },
+    )
   }
 
   const sourceParam = (formData.get('source') as string | null)?.trim()
