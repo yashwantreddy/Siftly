@@ -29,8 +29,8 @@ test('sanitizeOllamaBaseUrl trims whitespace and falls back to default when empt
 })
 
 test('sanitizeOllamaVisionModel trims whitespace and falls back to default when empty', () => {
-  assert.equal(sanitizeOllamaVisionModel(' qwen3.5:9b '), 'qwen3.5:9b')
-  assert.equal(DEFAULT_OLLAMA_VISION_MODEL, 'qwen3.5:9b')
+  assert.equal(sanitizeOllamaVisionModel(' gemma3:4b '), 'gemma3:4b')
+  assert.equal(DEFAULT_OLLAMA_VISION_MODEL, 'gemma3:4b')
   assert.equal(sanitizeOllamaVisionModel(''), DEFAULT_OLLAMA_VISION_MODEL)
 })
 

@@ -39,7 +39,7 @@ Siftly can run the **image vision**, **semantic enrichment**, and **categorizati
 Settings:
 - `imageVisionProvider` — shared preprocessing provider: `anthropic` (default) or `ollama`
 - `ollamaBaseUrl` — default `http://127.0.0.1:11434`
-- `ollamaVisionModel` — shared Ollama preprocessing model for vision, enrichment, and categorization, default `qwen3.5:9b`
+- `ollamaVisionModel` — shared Ollama preprocessing model for vision, enrichment, and categorization, default `gemma3:4b`
 - `SIFTLY_LOG_OLLAMA_RESPONSES=1` — log raw Ollama replies for preprocessing steps to the server console
 
 To verify it's working, hit: `GET /api/settings/cli-status`

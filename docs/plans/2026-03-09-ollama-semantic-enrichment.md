@@ -152,7 +152,7 @@ Add tests for:
 test('createOllamaSemanticEnrichmentProvider parses message.content JSON arrays', async () => {
   const provider = createOllamaSemanticEnrichmentProvider({
     baseUrl: 'http://127.0.0.1:11434',
-    model: 'qwen3.5:9b',
+    model: 'gemma3:4b',
     fetchImpl: async () => new Response(JSON.stringify({
       message: {
         content: '[{"id":"abc","tags":["rag"],"sentiment":"neutral","people":[],"companies":["Ollama"]}]',
@@ -168,7 +168,7 @@ test('createOllamaSemanticEnrichmentProvider parses message.content JSON arrays'
 test('createOllamaSemanticEnrichmentProvider throws on HTTP config errors', async () => {
   const provider = createOllamaSemanticEnrichmentProvider({
     baseUrl: 'http://127.0.0.1:11434',
-    model: 'qwen3.5:9b',
+    model: 'gemma3:4b',
     fetchImpl: async () => new Response(JSON.stringify({ error: 'model not found' }), { status: 404 }),
   })
 
@@ -425,7 +425,7 @@ npx next dev
 Then confirm:
 - Settings shows `AI preprocessing provider`
 - With provider `ollama`, the copy says image vision + semantic enrichment use Ollama
-- The Ollama model field still defaults to `qwen3.5:9b`
+- The Ollama model field still defaults to `gemma3:4b`
 - Running the categorization pipeline with provider `ollama` enriches bookmarks without requiring Claude for the enrichment stage
 - Categorization itself still requires Anthropic/Claude
 

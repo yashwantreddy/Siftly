@@ -107,7 +107,7 @@ Add tests for:
 test('createOllamaCategorizationProvider parses message.content assignment arrays', async () => {
   const provider = createOllamaCategorizationProvider({
     baseUrl: 'http://127.0.0.1:11434',
-    model: 'qwen3.5:9b',
+    model: 'gemma3:4b',
     fetchImpl: async () => new Response(JSON.stringify({
       message: {
         content: '[{"tweetId":"1","assignments":[{"category":"ai-resources","confidence":0.92}]}]',
@@ -123,7 +123,7 @@ test('createOllamaCategorizationProvider parses message.content assignment array
 test('createOllamaCategorizationProvider throws on malformed JSON', async () => {
   const provider = createOllamaCategorizationProvider({
     baseUrl: 'http://127.0.0.1:11434',
-    model: 'qwen3.5:9b',
+    model: 'gemma3:4b',
     fetchImpl: async () => new Response(JSON.stringify({
       message: { content: '{"not":"an-array"}' },
     }), { status: 200 }),

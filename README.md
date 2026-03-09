@@ -124,7 +124,7 @@ Siftly can run the **image vision**, **semantic enrichment**, and **categorizati
 
 - Set **AI preprocessing provider** to `Ollama`
 - Set your Ollama server URL (default: `http://127.0.0.1:11434`)
-- Set a vision-capable model name (default: `qwen3.5:9b`)
+- Set a vision-capable model name (default: `gemma3:4b`)
 - Use **Test Ollama** to verify reachability and model availability
 - Set `SIFTLY_LOG_OLLAMA_RESPONSES=1` to print raw Ollama replies for vision, enrichment, and categorization to the server console
 
@@ -254,7 +254,7 @@ All settings are manageable in the **Settings** page at `/settings` or via envir
 | AI Model | Settings page only | Haiku 4.5 (default, fastest/cheapest), Sonnet 4.6, Opus 4.6 |
 | AI Preprocessing Provider | Settings page only | `anthropic` (default) or `ollama` for local image analysis, semantic enrichment, and categorization |
 | Ollama Base URL | Settings page only | Local Ollama server URL used when preprocessing provider is `ollama` |
-| Ollama Preprocessing Model | Settings page only | Shared Ollama model for image analysis, semantic enrichment, and categorization, e.g. `qwen3.5:9b` |
+| Ollama Preprocessing Model | Settings page only | Shared Ollama model for image analysis, semantic enrichment, and categorization, e.g. `gemma3:4b` |
 | OpenAI Key | Settings page only | Alternative provider if no Anthropic key is set |
 | Database | `DATABASE_URL` | SQLite file path (default: `file:./prisma/dev.db`) |
 

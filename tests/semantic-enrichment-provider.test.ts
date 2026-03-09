@@ -39,7 +39,7 @@ test('getSemanticEnrichmentTestPrompt keeps the existing JSON contract', () => {
 test('createOllamaSemanticEnrichmentProvider parses message.content JSON arrays', async () => {
   const provider = createOllamaSemanticEnrichmentProvider({
     baseUrl: 'http://127.0.0.1:11434',
-    model: 'qwen3.5:9b',
+    model: 'gemma3:4b',
     fetchImpl: async () => new Response(JSON.stringify({
       message: {
         content: '[{"id":"abc","tags":["rag"],"sentiment":"neutral","people":[],"companies":["Ollama"]}]',
@@ -55,7 +55,7 @@ test('createOllamaSemanticEnrichmentProvider parses message.content JSON arrays'
 test('createOllamaSemanticEnrichmentProvider throws on HTTP config errors', async () => {
   const provider = createOllamaSemanticEnrichmentProvider({
     baseUrl: 'http://127.0.0.1:11434',
-    model: 'qwen3.5:9b',
+    model: 'gemma3:4b',
     fetchImpl: async () => new Response(JSON.stringify({ error: 'model not found' }), { status: 404 }),
   })
 

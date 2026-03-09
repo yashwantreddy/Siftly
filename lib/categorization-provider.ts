@@ -92,15 +92,52 @@ export function getCategorizationTestPrompt(): string {
   )
 }
 
-export function extractCanonicalCategorizationJson(text: string): string {
-  const match = text.match(/\[[\s\S]*\]/)
-  if (!match) {
-    throw new Error('Categorization response did not contain a JSON array.')
+function normalizeCategorizationPayload(payload: unknown): Record<string, unknown>[] {
+  if (Array.isArray(payload)) {
+    return payload as Record<string, unknown>[]
   }
 
-  const parsed = JSON.parse(match[0]) as Record<string, unknown>[]
-  if (!Array.isArray(parsed)) {
-    throw new Error('Categorization response was not a JSON array.')
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>
+
+    if (REQUIRED_CATEGORIZATION_FIELDS.every((field) => field in record)) {
+      return [record]
+    }
+
+    for (const key of ['results', 'items', 'data']) {
+      if (Array.isArray(record[key])) {
+        return record[key] as Record<string, unknown>[]
+      }
+    }
+  }
+
+  throw new Error('Categorization response was not a JSON array.')
+}
+
+function tryParseCategorizationCandidate(candidate: string): Record<string, unknown>[] | null {
+  try {
+    return normalizeCategorizationPayload(JSON.parse(candidate))
+  } catch {
+    return null
+  }
+}
+
+export function extractCanonicalCategorizationJson(text: string): string {
+  const candidates = [
+    text.trim(),
+    text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim(),
+    text.match(/\{[\s\S]*\}/)?.[0],
+    text.match(/\[[\s\S]*\]/)?.[0],
+  ].filter((candidate): candidate is string => Boolean(candidate && candidate.trim()))
+
+  let parsed: Record<string, unknown>[] | null = null
+  for (const candidate of candidates) {
+    parsed = tryParseCategorizationCandidate(candidate)
+    if (parsed) break
+  }
+
+  if (!parsed) {
+    throw new Error('Categorization response did not contain a JSON array.')
   }
 
   for (const row of parsed) {
@@ -228,7 +265,7 @@ export function createOllamaCategorizationProvider(options: {
 
       const rawText = extractTextFromOllamaResponse(payload)
       logOllamaResponseDebug('categorization', rawText)
-      return parseCategorizationResponse(extractCanonicalCategorizationJson(rawText), validSlugs)
+      return parseCategorizationResponse(rawText, validSlugs)
     },
   }
 }
