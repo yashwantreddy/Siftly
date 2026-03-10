@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  buildCategorizationPrompt,
   createOllamaCategorizationProvider,
   extractCanonicalCategorizationJson,
   getCategorizationTestPrompt,
@@ -40,6 +41,29 @@ test('getCategorizationTestPrompt preserves tweetId and assignments schema', () 
   const prompt = getCategorizationTestPrompt()
   assert.match(prompt, /"tweetId"/)
   assert.match(prompt, /"assignments"/)
+})
+
+test('buildCategorizationPrompt emits bookmark payloads with tweetId fields', () => {
+  const prompt = buildCategorizationPrompt(
+    [{ tweetId: 'tweet-123', text: 'AI agents are useful' }],
+    { 'ai-resources': 'AI and ML content' },
+    ['ai-resources'],
+  )
+
+  assert.match(prompt, /"tweetId": "tweet-123"/)
+  assert.doesNotMatch(prompt, /"id": "tweet-123"/)
+})
+
+test('parseCategorizationResponse accepts id as a fallback tweet identifier', () => {
+  const rows = parseCategorizationResponse(
+    '[{"id":"1","assignments":[{"category":"ai-resources","confidence":0.92}]}]',
+    new Set(['ai-resources']),
+  )
+
+  assert.deepEqual(rows, [{
+    tweetId: '1',
+    assignments: [{ category: 'ai-resources', confidence: 0.92 }],
+  }])
 })
 
 test('createOllamaCategorizationProvider parses message.content assignment arrays', async () => {

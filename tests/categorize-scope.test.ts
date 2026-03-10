@@ -39,6 +39,20 @@ test('parseCategorizeRequestBody defaults to all stages and no scope', () => {
   })
 })
 
+test('parseCategorizeRequestBody preserves bookmark ids for scoped runs', () => {
+  const parsed = parseCategorizeRequestBody(JSON.stringify({
+    bookmarkIds: ['bm-001', 'bm-002'],
+    stages: ['categorize'],
+  }))
+
+  assert.deepEqual(parsed, {
+    bookmarkIds: ['bm-001', 'bm-002'],
+    apiKey: undefined,
+    force: false,
+    stages: ['categorize'],
+  })
+})
+
 test('buildCategorizeStageSelection keeps only requested stages when not forced', () => {
   const selection = buildCategorizeStageSelection(['entities', 'vision'], false)
 

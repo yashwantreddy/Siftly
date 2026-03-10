@@ -38,7 +38,7 @@ export function buildCategorizationPrompt(
   ).join('\n')
 
   const tweetData = bookmarks.map((bookmark) => {
-    const entry: Record<string, unknown> = { id: bookmark.tweetId, text: bookmark.text.slice(0, 400) }
+    const entry: Record<string, unknown> = { tweetId: bookmark.tweetId, text: bookmark.text.slice(0, 400) }
     const imageContext = buildImageContext(bookmark.imageTags)
     if (imageContext) entry.images = imageContext
     if (bookmark.semanticTags?.length) entry.aiTags = bookmark.semanticTags.slice(0, 20).join(', ')
@@ -94,24 +94,33 @@ export function getCategorizationTestPrompt(): string {
 
 function normalizeCategorizationPayload(payload: unknown): Record<string, unknown>[] {
   if (Array.isArray(payload)) {
-    return payload as Record<string, unknown>[]
+    return payload.map(normalizeCategorizationRow)
   }
 
   if (payload && typeof payload === 'object') {
     const record = payload as Record<string, unknown>
+    const normalizedRecord = normalizeCategorizationRow(record)
 
-    if (REQUIRED_CATEGORIZATION_FIELDS.every((field) => field in record)) {
-      return [record]
+    if (REQUIRED_CATEGORIZATION_FIELDS.every((field) => field in normalizedRecord)) {
+      return [normalizedRecord]
     }
 
     for (const key of ['results', 'items', 'data']) {
       if (Array.isArray(record[key])) {
-        return record[key] as Record<string, unknown>[]
+        return (record[key] as Record<string, unknown>[]).map(normalizeCategorizationRow)
       }
     }
   }
 
   throw new Error('Categorization response was not a JSON array.')
+}
+
+function normalizeCategorizationRow(row: Record<string, unknown>): Record<string, unknown> {
+  if (!('tweetId' in row) && typeof row.id === 'string') {
+    return { ...row, tweetId: row.id }
+  }
+
+  return row
 }
 
 function tryParseCategorizationCandidate(candidate: string): Record<string, unknown>[] | null {
